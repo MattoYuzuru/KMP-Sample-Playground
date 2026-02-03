@@ -2,7 +2,7 @@ import SwiftUI
 import Shared
 
 final class TaskStoreModel: ObservableObject {
-    private let store = TaskStore()
+    let store = TaskStore()
     @Published var tasks: [FocusTask] = []
 
     init() {
@@ -13,27 +13,35 @@ final class TaskStoreModel: ObservableObject {
         tasks = toFocusTasks(store.list())
     }
 
-    func addTask(title: String) {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        _ = store.addTask(
-            title: trimmed,
-            notes: "",
-            pomodoro: PomodoroSettings(workMinutes: 25, breakMinutes: 5)
+    func createTask(title: String, description: String, tags: String, deadline: String?) -> FocusTask? {
+        let task = store.addTask(
+            title: title,
+            description: description,
+            tagsCsv: tags,
+            deadlineIso: deadline
+        )
+        refresh()
+        return task
+    }
+
+    func updateTask(id: String, title: String, description: String, tags: String, deadline: String?) {
+        _ = store.updateTaskMeta(
+            id: id,
+            title: title,
+            description: description,
+            tagsCsv: tags,
+            deadlineIso: deadline
         )
         refresh()
     }
 
-    func toggleDone(task: FocusTask) {
-        _ = store.toggleDone(id: task.id, isDone: !task.isDone)
+    func markDone(id: String, done: Bool) {
+        _ = store.markDone(id: id, done: done)
         refresh()
     }
 
-    func deleteTasks(at offsets: IndexSet) {
-        for index in offsets {
-            let task = tasks[index]
-            _ = store.deleteTask(id: task.id)
-        }
+    func deleteTask(id: String) {
+        _ = store.deleteTask(id: id)
         refresh()
     }
 }
@@ -52,134 +60,324 @@ private func toFocusTasks(_ list: KotlinCollectionsList) -> [FocusTask] {
 
 struct ContentView: View {
     @StateObject private var model = TaskStoreModel()
-    @State private var newTitle = ""
+    @State private var searchText = ""
+    @State private var path: [String] = []
+    @State private var showCreate = false
+    @State private var bannerMessage: String?
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            HomeView(
+                tasks: filteredTasks,
+                store: model.store,
+                searchText: $searchText,
+                onCreate: { showCreate = true },
+                onOpen: { task in
+                    if model.store.isTimerRunningForOtherTask(taskId: task.id) {
+                        bannerMessage = "Таймер уже запущен для другой задачи"
+                    } else {
+                        path.append(task.id)
+                    }
+                }
+            )
+            .navigationDestination(for: String.self) { taskId in
+                TaskDetailView(taskId: taskId, model: model)
+            }
+            .sheet(isPresented: $showCreate) {
+                CreateTaskView(model: model, onClose: { showCreate = false }, onOpenTask: { task in
+                    showCreate = false
+                    path.append(task.id)
+                })
+            }
+            .overlay(alignment: .top) {
+                if let bannerMessage {
+                    BannerMessage(text: bannerMessage)
+                        .padding()
+                }
+            }
+            .onChange(of: bannerMessage) { newValue in
+                guard newValue != nil else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+                    bannerMessage = nil
+                }
+            }
+        }
+    }
+
+    private var filteredTasks: [FocusTask] {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return model.tasks }
+        return model.tasks.filter { task in
+            let text = (task.title + " " + task.description).lowercased()
+            return text.contains(trimmed.lowercased())
+        }
+    }
+}
+
+struct HomeView: View {
+    let tasks: [FocusTask]
+    let store: TaskStore
+    @Binding var searchText: String
+    let onCreate: () -> Void
+    let onOpen: (FocusTask) -> Void
+
+    var body: some View {
+    let now = Date().timeIntervalSince1970 * 1000
+        let newTasks = tasks.filter { $0.status != TaskStatus.deleted && !store.isOverdue(task: $0) }
+            .filter { now - Double($0.createdAtEpochMillis) <= 24 * 60 * 60 * 1000 }
+            .sorted { $0.createdAtEpochMillis > $1.createdAtEpochMillis }
+        let olderTasks = tasks.filter { $0.status != TaskStatus.deleted && !store.isOverdue(task: $0) }
+            .filter { now - Double($0.createdAtEpochMillis) > 24 * 60 * 60 * 1000 }
+            .sorted { $0.createdAtEpochMillis > $1.createdAtEpochMillis }
+        let overdueTasks = tasks.filter { store.isOverdue(task: $0) && $0.status != TaskStatus.deleted }
+            .sorted { $0.updatedAtEpochMillis > $1.updatedAtEpochMillis }
+        let deletedTasks = tasks.filter { $0.status == TaskStatus.deleted }
+            .sorted { $0.updatedAtEpochMillis > $1.updatedAtEpochMillis }
+
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("FocusTasks")
+                    .font(.largeTitle).bold()
+                TextField("Поиск задач", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                Button("Новая задача") {
+                    onCreate()
+                }
+                TimerBanner(store: store, onOpen: onOpen)
+                TaskSection(title: "Новые задачи", tasks: newTasks, store: store, onOpen: onOpen)
+                TaskSection(title: "Более старые", tasks: olderTasks, store: store, onOpen: onOpen)
+                TaskSection(title: "Просроченные", tasks: overdueTasks, store: store, onOpen: onOpen)
+                TaskSection(title: "Удаленные", tasks: deletedTasks, store: store, onOpen: onOpen)
+            }
+            .padding()
+        }
+    }
+}
+
+struct TaskSection: View {
+    let title: String
+    let tasks: [FocusTask]
+    let store: TaskStore
+    let onOpen: (FocusTask) -> Void
+
+    var body: some View {
+        if tasks.isEmpty { return AnyView(EmptyView()) }
+        return AnyView(
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.headline)
+                ForEach(tasks, id: \.id) { task in
+                    TaskRow(task: task, isOverdue: store.isOverdue(task: task))
+                        .onTapGesture { onOpen(task) }
+                }
+            }
+        )
+    }
+}
+
+struct TaskRow: View {
+    let task: FocusTask
+    let isOverdue: Bool
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(task.title).font(.headline)
+                Text(statusLabel()).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("За работу")
+                .font(.caption)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(.systemBlue).opacity(0.1))
+                .clipShape(Capsule())
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func statusLabel() -> String {
+        if task.status == TaskStatus.deleted { return "Удалено" }
+        if task.status == TaskStatus.done { return "Готово" }
+        if isOverdue { return "Просрочено" }
+        return "Активно"
+    }
+}
+
+struct CreateTaskView: View {
+    @ObservedObject var model: TaskStoreModel
+    let onClose: () -> Void
+    let onOpenTask: (FocusTask) -> Void
+
+    @State private var title = ""
+    @State private var description = ""
+    @State private var tags = ""
+    @State private var deadline = ""
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 12) {
-                HStack {
-                    TextField("New task", text: $newTitle)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Add") {
-                        model.addTask(title: newTitle)
-                        newTitle = ""
-                    }
+            Form {
+                Section(header: Text("Метаданные")) {
+                    TextField("Название", text: $title)
+                    TextField("Описание", text: $description)
+                    TextField("Теги (до 3, через запятую)", text: $tags)
+                    TextField("Дедлайн ISO, например 2026-02-02T18:30", text: $deadline)
                 }
-                .padding(.horizontal)
-
-                if model.tasks.isEmpty {
-                    Spacer()
-                    Text("No tasks yet. Add your first focus task.")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                } else {
-                    List {
-                        ForEach(model.tasks, id: \.id) { task in
-                            HStack {
-                                Button(action: { model.toggleDone(task: task) }) {
-                                    Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
-                                }
-                                .buttonStyle(.plain)
-                                NavigationLink {
-                                    PomodoroTimerView(task: task)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(task.title)
-                                            .font(.headline)
-                                        Text(task.isDone ? "Done" : "Todo")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
+                Section {
+                    Button("Создать и открыть") {
+                        if let task = model.createTask(
+                            title: title,
+                            description: description,
+                            tags: tags,
+                            deadline: deadline.isEmpty ? nil : deadline
+                        ) {
+                            onOpenTask(task)
                         }
-                        .onDelete(perform: model.deleteTasks)
                     }
-                    .listStyle(.plain)
+                    Button("Создать и назад") {
+                        _ = model.createTask(
+                            title: title,
+                            description: description,
+                            tags: tags,
+                            deadline: deadline.isEmpty ? nil : deadline
+                        )
+                        onClose()
+                    }
                 }
             }
-            .navigationTitle("FocusTasks")
+            .navigationTitle("Новая задача")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Закрыть") { onClose() }
+                }
+            }
         }
     }
 }
 
-private enum TimerPhase {
-    case work
-    case rest
-}
+struct TaskDetailView: View {
+    let taskId: String
+    @ObservedObject var model: TaskStoreModel
 
-struct PomodoroTimerView: View {
-    let task: FocusTask
-    @State private var phase: TimerPhase = .work
-    @State private var isRunning = false
-    @State private var remainingSeconds = 0
-    @State private var timer: Timer?
-
-    private var workSeconds: Int { Int(task.pomodoro.workMinutes) * 60 }
-    private var breakSeconds: Int { Int(task.pomodoro.breakMinutes) * 60 }
+    @State private var title = ""
+    @State private var description = ""
+    @State private var tags = ""
+    @State private var deadline = ""
+    @State private var timerSnapshot: TimerSnapshot?
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text(task.title)
-                .font(.title2)
-                .fontWeight(.semibold)
-            Text(phase == .work ? "Work" : "Break")
-                .foregroundStyle(.secondary)
-            Text(formatTime(remainingSeconds))
-                .font(.system(size: 56, weight: .bold, design: .rounded))
-            HStack(spacing: 12) {
-                Button("Start") { startTimer() }
-                Button("Pause") { pauseTimer() }
-                Button("Stop") { resetTimer() }
+        let task = model.tasks.first { $0.id == taskId }
+        if let task {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Профиль задачи").font(.title2).bold()
+                    TextField("Название", text: $title)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Описание", text: $description)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Теги (до 3, через запятую)", text: $tags)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Дедлайн ISO, например 2026-02-02T18:30", text: $deadline)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Сохранить") {
+                        model.updateTask(
+                            id: taskId,
+                            title: title,
+                            description: description,
+                            tags: tags,
+                            deadline: deadline.isEmpty ? nil : deadline
+                        )
+                    }
+                    Divider()
+                    Text("Статистика").font(.headline)
+                    Text("Сессии: \(model.store.sessionCount(taskId: taskId))")
+                    Text("Время фокуса: \(formatDuration(model.store.totalFocusedSeconds(taskId: taskId)))")
+                    Divider()
+                    Text("Помодоро").font(.headline)
+                    Text(timerSnapshot?.phase == TimerPhase.break_ ? "Перерыв" : "Работа")
+                        .foregroundStyle(.secondary)
+                    Text(formatClock(timerSnapshot?.remainingSeconds ?? Int(task.pomodoro.workMinutes) * 60))
+                        .font(.system(size: 54, weight: .bold, design: .rounded))
+                    HStack(spacing: 12) {
+                        Button("Старт") { _ = model.store.startTimer(taskId: taskId) }
+                        Button("Пауза") { _ = model.store.pauseTimer() }
+                        Button("Закончить сессию") { _ = model.store.finishSession() }
+                    }
+                    HStack(spacing: 12) {
+                        Button("Готово") { model.markDone(id: taskId, done: true) }
+                        Button("Удалить") { model.deleteTask(id: taskId) }
+                    }
+                }
+                .padding()
             }
-            Text("Work \(task.pomodoro.workMinutes)m / Break \(task.pomodoro.breakMinutes)m")
-                .foregroundStyle(.secondary)
+            .onAppear {
+                title = task.title
+                description = task.description
+                tags = task.tags.joined(separator: ", ")
+                deadline = model.store.deadlineIsoForTask(taskId: taskId) ?? ""
+                updateTimer()
+            }
+            .onReceive(timerPublisher) { _ in
+                updateTimer()
+            }
+        } else {
+            Text("Задача не найдена")
         }
-        .padding()
-        .onAppear { resetTimer() }
-        .onDisappear { pauseTimer() }
     }
 
-    private func startTimer() {
-        guard timer == nil else { return }
-        isRunning = true
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            tick()
-        }
+    private var timerPublisher: Timer.TimerPublisher {
+        Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     }
 
-    private func pauseTimer() {
-        isRunning = false
-        timer?.invalidate()
-        timer = nil
+    private func updateTimer() {
+        timerSnapshot = model.store.timerSnapshot(taskId: taskId)
     }
+}
 
-    private func resetTimer() {
-        pauseTimer()
-        phase = .work
-        remainingSeconds = workSeconds
-    }
+struct TimerBanner: View {
+    let store: TaskStore
+    let onOpen: (FocusTask) -> Void
 
-    private func tick() {
-        guard isRunning else { return }
-        if remainingSeconds > 0 {
-            remainingSeconds -= 1
-        }
-        if remainingSeconds <= 0 {
-            phase = phase == .work ? .rest : .work
-            remainingSeconds = phase == .work ? workSeconds : breakSeconds
+    var body: some View {
+        if let taskId = store.activeTimerTaskId() {
+            let tasks = toFocusTasks(store.list())
+            if let task = tasks.first(where: { $0.id == taskId }) {
+                HStack {
+                    Text("Таймер запущен")
+                    Spacer()
+                    Button("Открыть") { onOpen(task) }
+                }
+                .padding()
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
         }
     }
 }
 
-private func formatTime(_ totalSeconds: Int) -> String {
+struct BannerMessage: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .padding(12)
+            .frame(maxWidth: .infinity)
+            .background(Color(.systemGray6))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private func formatClock(_ totalSeconds: Int) -> String {
     let minutes = totalSeconds / 60
     let seconds = totalSeconds % 60
     return String(format: "%02d:%02d", minutes, seconds)
 }
 
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
-    }
+private func formatDuration(_ totalSeconds: Int) -> String {
+    let hours = totalSeconds / 3600
+    let minutes = (totalSeconds % 3600) / 60
+    if hours > 0 { return "\(hours)ч \(minutes)м" }
+    return "\(minutes)м"
 }
