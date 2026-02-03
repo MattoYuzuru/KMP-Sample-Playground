@@ -1,9 +1,11 @@
 package app.tasks.focus.model
 
-import kotlinx.datetime.Clock
+import kotlin.time.Instant
+import kotlin.time.Clock
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toInstant
+import kotlinx.datetime.toLocalDateTime
 import kotlin.math.max
 import kotlin.random.Random
 
@@ -201,7 +203,7 @@ class TaskStore {
     fun deadlineIsoForTask(taskId: String): String? {
         val task = tasks.firstOrNull { it.id == taskId } ?: return null
         val deadline = task.deadlineEpochMillis ?: return null
-        val instant = kotlinx.datetime.Instant.fromEpochMilliseconds(deadline)
+        val instant = Instant.fromEpochMilliseconds(deadline)
         return instant.toLocalDateTime(TimeZone.currentSystemDefault()).toString()
     }
 

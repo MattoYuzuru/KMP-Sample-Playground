@@ -35,7 +35,10 @@ import app.tasks.focus.model.TaskStatus
 import app.tasks.focus.model.TaskStore
 import app.tasks.focus.model.TimerPhase
 import kotlinx.coroutines.delay
-import kotlinx.datetime.Clock
+import kotlin.time.Clock
+import kotlin.time.Instant
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 
 private sealed class Screen {
     data object Home : Screen()
@@ -72,6 +75,7 @@ fun App() {
                     }
                 },
             )
+
             Screen.CreateTask -> CreateTaskScreen(
                 onBack = { screen = Screen.Home },
                 onCreate = { title, description, tags, deadline ->
@@ -97,6 +101,7 @@ fun App() {
                     screen = Screen.Home
                 },
             )
+
             is Screen.TaskDetail -> TaskDetailScreen(
                 store = store,
                 taskId = current.taskId,
@@ -206,7 +211,11 @@ private fun TaskSection(
     isOverdue: (FocusTask) -> Boolean,
 ) {
     if (tasks.isEmpty()) return
-    Text(text = title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold
+    )
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         items(tasks, key = { it.id }) { task ->
             TaskRow(
@@ -233,7 +242,11 @@ private fun TaskRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = task.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+                Text(
+                    text = task.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium
+                )
                 val statusLabel = when {
                     task.status == TaskStatus.DELETED -> "Удалено"
                     task.status == TaskStatus.DONE -> "Готово"
@@ -271,7 +284,10 @@ private fun CreateTaskScreen(
             Spacer(modifier = Modifier.width(12.dp))
             Text(text = "Новая задача", style = MaterialTheme.typography.titleLarge)
         }
-        OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Название") })
+        OutlinedTextField(
+            value = title,
+            onValueChange = { title = it },
+            label = { Text("Название") })
         OutlinedTextField(
             value = description,
             onValueChange = { description = it },
@@ -291,7 +307,13 @@ private fun CreateTaskScreen(
             Button(onClick = { onCreate(title, description, tags, deadline.ifBlank { null }) }) {
                 Text("Создать и открыть")
             }
-            Button(onClick = { onCreateAndBack(title, description, tags, deadline.ifBlank { null }) }) {
+            Button(onClick = {
+                onCreateAndBack(
+                    title,
+                    description,
+                    tags,
+                    deadline.ifBlank { null })
+            }) {
                 Text("Создать и назад")
             }
         }
@@ -324,7 +346,9 @@ private fun TaskDetailScreen(
     var title by remember(taskId) { mutableStateOf(task.title) }
     var description by remember(taskId) { mutableStateOf(task.description) }
     var tags by remember(taskId) { mutableStateOf(task.tags.joinToString(", ")) }
-    var deadline by remember(taskId) { mutableStateOf(task.deadlineEpochMillis?.let { epochToIso(it) } ?: "") }
+    var deadline by remember(taskId) {
+        mutableStateOf(task.deadlineEpochMillis?.let { epochToIso(it) } ?: "")
+    }
     var timerSnapshot by remember { mutableStateOf(store.timerSnapshot(taskId)) }
 
     LaunchedEffect(taskId) {
@@ -349,7 +373,10 @@ private fun TaskDetailScreen(
             Spacer(modifier = Modifier.width(12.dp))
             Text(text = "Профиль задачи", style = MaterialTheme.typography.titleLarge)
         }
-        OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Название") })
+        OutlinedTextField(
+            value = title,
+            onValueChange = { title = it },
+            label = { Text("Название") })
         OutlinedTextField(
             value = description,
             onValueChange = { description = it },
@@ -442,6 +469,6 @@ private fun formatDuration(totalSeconds: Int): String {
 
 private fun epochToIso(epochMillis: Long): String {
     if (epochMillis <= 0) return ""
-    val instant = kotlinx.datetime.Instant.fromEpochMilliseconds(epochMillis)
-    return instant.toLocalDateTime(kotlinx.datetime.TimeZone.currentSystemDefault()).toString()
+    val instant = Instant.fromEpochMilliseconds(epochMillis)
+    return instant.toLocalDateTime(TimeZone.currentSystemDefault()).toString()
 }
