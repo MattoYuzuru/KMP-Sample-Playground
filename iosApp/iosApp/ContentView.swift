@@ -122,7 +122,7 @@ struct HomeView: View {
     let onOpen: (FocusTask) -> Void
 
     var body: some View {
-    let now = Date().timeIntervalSince1970 * 1000
+        let now = Date().timeIntervalSince1970 * 1000
         let newTasks = tasks.filter { $0.status != TaskStatus.deleted && !store.isOverdue(task: $0) }
             .filter { now - Double($0.createdAtEpochMillis) <= 24 * 60 * 60 * 1000 }
             .sorted { $0.createdAtEpochMillis > $1.createdAtEpochMillis }
@@ -185,12 +185,14 @@ struct TaskRow: View {
                 Text(statusLabel()).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Text("За работу")
-                .font(.caption)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color(.systemBlue).opacity(0.1))
-                .clipShape(Capsule())
+            if task.status == TaskStatus.active {
+                Text("За работу")
+                    .font(.caption)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(.systemBlue).opacity(0.1))
+                    .clipShape(Capsule())
+            }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -214,7 +216,8 @@ struct CreateTaskView: View {
     @State private var title = ""
     @State private var description = ""
     @State private var tags = ""
-    @State private var deadline = ""
+    @State private var hasDeadline = false
+    @State private var deadlineDate = Date()
 
     var body: some View {
         NavigationStack {
@@ -223,7 +226,15 @@ struct CreateTaskView: View {
                     TextField("Название", text: $title)
                     TextField("Описание", text: $description)
                     TextField("Теги (до 3, через запятую)", text: $tags)
-                    TextField("Дедлайн ISO, например 2026-02-02T18:30", text: $deadline)
+                    Toggle("Есть дедлайн", isOn: $hasDeadline)
+                    if hasDeadline {
+                        DatePicker(
+                            "Дедлайн",
+                            selection: $deadlineDate,
+                            in: Date()...,
+                            displayedComponents: [.date, .hourAndMinute]
+                        )
+                    }
                 }
                 Section {
                     Button("Создать и открыть") {
@@ -231,7 +242,7 @@ struct CreateTaskView: View {
                             title: title,
                             description: description,
                             tags: tags,
-                            deadline: deadline.isEmpty ? nil : deadline
+                            deadline: hasDeadline ? dateToLocalIso(deadlineDate) : nil
                         ) {
                             onOpenTask(task)
                         }
@@ -241,7 +252,7 @@ struct CreateTaskView: View {
                             title: title,
                             description: description,
                             tags: tags,
-                            deadline: deadline.isEmpty ? nil : deadline
+                            deadline: hasDeadline ? dateToLocalIso(deadlineDate) : nil
                         )
                         onClose()
                     }
@@ -261,53 +272,89 @@ struct TaskDetailView: View {
     let taskId: String
     @ObservedObject var model: TaskStoreModel
 
+    @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var description = ""
     @State private var tags = ""
-    @State private var deadline = ""
+    @State private var hasDeadline = false
+    @State private var deadlineDate = Date()
     @State private var timerSnapshot: TimerSnapshot?
 
     var body: some View {
         let task = model.tasks.first { $0.id == taskId }
         if let task {
+            let isActive = task.status == TaskStatus.active
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Профиль задачи").font(.title2).bold()
-                    TextField("Название", text: $title)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("Описание", text: $description)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("Теги (до 3, через запятую)", text: $tags)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("Дедлайн ISO, например 2026-02-02T18:30", text: $deadline)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Сохранить") {
-                        model.updateTask(
-                            id: taskId,
-                            title: title,
-                            description: description,
-                            tags: tags,
-                            deadline: deadline.isEmpty ? nil : deadline
-                        )
+                    if isActive {
+                        TextField("Название", text: $title)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("Описание", text: $description)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("Теги (до 3, через запятую)", text: $tags)
+                            .textFieldStyle(.roundedBorder)
+                        Toggle("Есть дедлайн", isOn: $hasDeadline)
+                        if hasDeadline {
+                            DatePicker(
+                                "Дедлайн",
+                                selection: $deadlineDate,
+                                in: Date()...,
+                                displayedComponents: [.date, .hourAndMinute]
+                            )
+                        }
+                        Button("Сохранить") {
+                            model.updateTask(
+                                id: taskId,
+                                title: title,
+                                description: description,
+                                tags: tags,
+                                deadline: hasDeadline ? dateToLocalIso(deadlineDate) : nil
+                            )
+                        }
+                    } else {
+                        Text("Название: \(task.title)")
+                        Text("Описание: \(task.description.isEmpty ? "—" : task.description)")
+                        Text("Теги: \(task.tags.isEmpty ? "—" : task.tags.joined(separator: ", "))")
+                        Text("Дедлайн: \(model.store.deadlineIsoForTask(taskId: taskId) ?? "—")")
                     }
                     Divider()
                     Text("Статистика").font(.headline)
                     Text("Сессии: \(model.store.sessionCount(taskId: taskId))")
                     Text("Время фокуса: \(formatDuration(model.store.totalFocusedSeconds(taskId: taskId)))")
-                    Divider()
-                    Text("Помодоро").font(.headline)
-                    Text(timerSnapshot?.phase == TimerPhase.break_ ? "Перерыв" : "Работа")
-                        .foregroundStyle(.secondary)
-                    Text(formatClock(timerSnapshot?.remainingSeconds ?? Int(task.pomodoro.workMinutes) * 60))
-                        .font(.system(size: 54, weight: .bold, design: .rounded))
-                    HStack(spacing: 12) {
-                        Button("Старт") { _ = model.store.startTimer(taskId: taskId) }
-                        Button("Пауза") { _ = model.store.pauseTimer() }
-                        Button("Закончить сессию") { _ = model.store.finishSession() }
-                    }
-                    HStack(spacing: 12) {
-                        Button("Готово") { model.markDone(id: taskId, done: true) }
-                        Button("Удалить") { model.deleteTask(id: taskId) }
+                    if isActive {
+                        Divider()
+                        Text("Помодоро").font(.headline)
+                        Text(timerSnapshot?.phase == TimerPhase.break_ ? "Перерыв" : "Работа")
+                            .foregroundStyle(.secondary)
+                        Text(formatClock(timerSnapshot?.remainingSeconds ?? Int(task.pomodoro.workMinutes) * 60))
+                            .font(.system(size: 54, weight: .bold, design: .rounded))
+                        let running = timerSnapshot?.isRunning == true
+                        let hasStarted = timerSnapshot != nil
+                        let startLabel = !hasStarted ? "Старт" : (running ? "Пауза" : "Продолжить")
+                        HStack(spacing: 12) {
+                            Button(startLabel) {
+                                if running {
+                                    _ = model.store.pauseTimer()
+                                } else {
+                                    _ = model.store.startTimer(taskId: taskId)
+                                }
+                            }
+                            Button("Закончить сессию") {
+                                _ = model.store.finishSession()
+                                dismiss()
+                            }
+                        }
+                        HStack(spacing: 12) {
+                            Button("Готово") {
+                                model.markDone(id: taskId, done: true)
+                                dismiss()
+                            }
+                            Button("Удалить") {
+                                model.deleteTask(id: taskId)
+                                dismiss()
+                            }
+                        }
                     }
                 }
                 .padding()
@@ -316,7 +363,12 @@ struct TaskDetailView: View {
                 title = task.title
                 description = task.description
                 tags = task.tags.joined(separator: ", ")
-                deadline = model.store.deadlineIsoForTask(taskId: taskId) ?? ""
+                if let millis = task.deadlineEpochMillis, millis > 0 {
+                    deadlineDate = dateFromEpochMillis(millis)
+                    hasDeadline = true
+                } else {
+                    hasDeadline = false
+                }
                 updateTimer()
             }
             .onReceive(timerPublisher) { _ in
@@ -380,4 +432,15 @@ private func formatDuration(_ totalSeconds: Int) -> String {
     let minutes = (totalSeconds % 3600) / 60
     if hours > 0 { return "\(hours)ч \(minutes)м" }
     return "\(minutes)м"
+}
+
+private func dateToLocalIso(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
+    return formatter.string(from: date)
+}
+
+private func dateFromEpochMillis(_ millis: Int64) -> Date {
+    Date(timeIntervalSince1970: TimeInterval(millis) / 1000)
 }

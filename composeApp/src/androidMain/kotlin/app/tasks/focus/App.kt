@@ -1,5 +1,9 @@
 package app.tasks.focus
 
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
+import android.os.Build
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -15,12 +19,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,10 +40,12 @@ import app.tasks.focus.model.TaskStatus
 import app.tasks.focus.model.TaskStore
 import app.tasks.focus.model.TimerPhase
 import kotlinx.coroutines.delay
-import kotlin.time.Clock
-import kotlin.time.Instant
-import kotlinx.datetime.TimeZone
-import kotlinx.datetime.toLocalDateTime
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Calendar
 
 private sealed class Screen {
     data object Home : Screen()
@@ -46,6 +53,7 @@ private sealed class Screen {
     data class TaskDetail(val taskId: String) : Screen()
 }
 
+@RequiresApi(Build.VERSION_CODES.O)
 @Composable
 @Preview
 fun App() {
@@ -142,7 +150,7 @@ private fun HomeScreen(
         val text = "${it.title} ${it.description}".lowercase()
         text.contains(query.trim().lowercase())
     }
-    val now = Clock.System.now().toEpochMilliseconds()
+    val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
     val newTasks = filtered.filter { it.status != TaskStatus.DELETED && !store.isOverdue(it) }
         .filter { now - it.createdAtEpochMillis <= 24 * 60 * 60 * 1000 }
         .sortedByDescending { it.createdAtEpochMillis }
@@ -256,11 +264,14 @@ private fun TaskRow(
                 Text(text = statusLabel, style = MaterialTheme.typography.bodySmall)
             }
             Spacer(modifier = Modifier.width(8.dp))
-            Button(onClick = onOpenTask) { Text("За работу") }
+            if (task.status == TaskStatus.ACTIVE) {
+                Button(onClick = onOpenTask) { Text("За работу") }
+            }
         }
     }
 }
 
+@RequiresApi(Build.VERSION_CODES.O)
 @Composable
 private fun CreateTaskScreen(
     onBack: () -> Unit,
@@ -270,7 +281,15 @@ private fun CreateTaskScreen(
     var title by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
     var tags by remember { mutableStateOf("") }
-    var deadline by remember { mutableStateOf("") }
+    var deadlineDate by remember { mutableStateOf<LocalDate?>(null) }
+    var deadlineTime by remember { mutableStateOf<LocalTime?>(null) }
+    val deadlineText by remember(deadlineDate, deadlineTime) {
+        derivedStateOf { formatDeadlineDisplay(deadlineDate, deadlineTime) }
+    }
+    val deadlineIso by remember(deadlineDate, deadlineTime) {
+        derivedStateOf { formatDeadlineIso(deadlineDate, deadlineTime) }
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     Column(
         modifier = Modifier
@@ -299,12 +318,47 @@ private fun CreateTaskScreen(
             label = { Text("Теги (до 3, через запятую)") },
         )
         OutlinedTextField(
-            value = deadline,
-            onValueChange = { deadline = it },
-            label = { Text("Дедлайн ISO, например 2026-02-02T18:30") },
+            value = deadlineText,
+            onValueChange = {},
+            enabled = false,
+            label = { Text("Дедлайн") },
         )
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = { onCreate(title, description, tags, deadline.ifBlank { null }) }) {
+            Button(onClick = {
+                val now = LocalDate.now()
+                val initial = deadlineDate ?: now
+                val dialog = DatePickerDialog(
+                    context,
+                    { _, year, month, dayOfMonth ->
+                        deadlineDate = LocalDate.of(year, month + 1, dayOfMonth)
+                        deadlineTime = normalizeTime(deadlineDate, deadlineTime)
+                    },
+                    initial.year,
+                    initial.monthValue - 1,
+                    initial.dayOfMonth,
+                )
+                val calendar = Calendar.getInstance()
+                calendar.set(now.year, now.monthValue - 1, now.dayOfMonth, 0, 0, 0)
+                dialog.datePicker.minDate = calendar.timeInMillis
+                dialog.show()
+            }) { Text("Выбрать дату") }
+            Button(onClick = {
+                val now = LocalTime.now()
+                val initial = deadlineTime ?: now
+                TimePickerDialog(
+                    context,
+                    { _, hourOfDay, minute ->
+                        deadlineTime = LocalTime.of(hourOfDay, minute)
+                        deadlineTime = normalizeTime(deadlineDate, deadlineTime)
+                    },
+                    initial.hour,
+                    initial.minute,
+                    true,
+                ).show()
+            }) { Text("Выбрать время") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(onClick = { onCreate(title, description, tags, deadlineIso) }) {
                 Text("Создать и открыть")
             }
             Button(onClick = {
@@ -312,7 +366,8 @@ private fun CreateTaskScreen(
                     title,
                     description,
                     tags,
-                    deadline.ifBlank { null })
+                    deadlineIso
+                )
             }) {
                 Text("Создать и назад")
             }
@@ -320,6 +375,7 @@ private fun CreateTaskScreen(
     }
 }
 
+@RequiresApi(Build.VERSION_CODES.O)
 @Composable
 private fun TaskDetailScreen(
     store: TaskStore,
@@ -346,10 +402,21 @@ private fun TaskDetailScreen(
     var title by remember(taskId) { mutableStateOf(task.title) }
     var description by remember(taskId) { mutableStateOf(task.description) }
     var tags by remember(taskId) { mutableStateOf(task.tags.joinToString(", ")) }
-    var deadline by remember(taskId) {
-        mutableStateOf(task.deadlineEpochMillis?.let { epochToIso(it) } ?: "")
+    var deadlineDate by remember(taskId) {
+        mutableStateOf(task.deadlineEpochMillis?.let { millisToLocalDate(it) })
+    }
+    var deadlineTime by remember(taskId) {
+        mutableStateOf(task.deadlineEpochMillis?.let { millisToLocalTime(it) })
     }
     var timerSnapshot by remember { mutableStateOf(store.timerSnapshot(taskId)) }
+    val deadlineText by remember(deadlineDate, deadlineTime) {
+        derivedStateOf { formatDeadlineDisplay(deadlineDate, deadlineTime) }
+    }
+    val deadlineIso by remember(deadlineDate, deadlineTime) {
+        derivedStateOf { formatDeadlineIso(deadlineDate, deadlineTime) }
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val isActive = task.status == TaskStatus.ACTIVE
 
     LaunchedEffect(taskId) {
         while (true) {
@@ -373,49 +440,103 @@ private fun TaskDetailScreen(
             Spacer(modifier = Modifier.width(12.dp))
             Text(text = "Профиль задачи", style = MaterialTheme.typography.titleLarge)
         }
-        OutlinedTextField(
-            value = title,
-            onValueChange = { title = it },
-            label = { Text("Название") })
-        OutlinedTextField(
-            value = description,
-            onValueChange = { description = it },
-            label = { Text("Описание") },
-        )
-        OutlinedTextField(
-            value = tags,
-            onValueChange = { tags = it },
-            label = { Text("Теги (до 3, через запятую)") },
-        )
-        OutlinedTextField(
-            value = deadline,
-            onValueChange = { deadline = it },
-            label = { Text("Дедлайн ISO, например 2026-02-02T18:30") },
-        )
-        Button(onClick = {
-            store.updateTaskMeta(taskId, title, description, tags, deadline.ifBlank { null })
-            onSaveMeta()
-        }) {
-            Text("Сохранить")
+        if (isActive) {
+            OutlinedTextField(
+                value = title,
+                onValueChange = { title = it },
+                label = { Text("Название") })
+            OutlinedTextField(
+                value = description,
+                onValueChange = { description = it },
+                label = { Text("Описание") },
+            )
+            OutlinedTextField(
+                value = tags,
+                onValueChange = { tags = it },
+                label = { Text("Теги (до 3, через запятую)") },
+            )
+            OutlinedTextField(
+                value = deadlineText,
+                onValueChange = {},
+                enabled = false,
+                label = { Text("Дедлайн") },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = {
+                    val now = LocalDate.now()
+                    val initial = deadlineDate ?: now
+                    val dialog = DatePickerDialog(
+                        context,
+                        { _, year, month, dayOfMonth ->
+                            deadlineDate = LocalDate.of(year, month + 1, dayOfMonth)
+                            deadlineTime = normalizeTime(deadlineDate, deadlineTime)
+                        },
+                        initial.year,
+                        initial.monthValue - 1,
+                        initial.dayOfMonth,
+                    )
+                    val calendar = Calendar.getInstance()
+                    calendar.set(now.year, now.monthValue - 1, now.dayOfMonth, 0, 0, 0)
+                    dialog.datePicker.minDate = calendar.timeInMillis
+                    dialog.show()
+                }) { Text("Выбрать дату") }
+                Button(onClick = {
+                    val now = LocalTime.now()
+                    val initial = deadlineTime ?: now
+                    TimePickerDialog(
+                        context,
+                        { _, hourOfDay, minute ->
+                            deadlineTime = LocalTime.of(hourOfDay, minute)
+                            deadlineTime = normalizeTime(deadlineDate, deadlineTime)
+                        },
+                        initial.hour,
+                        initial.minute,
+                        true,
+                    ).show()
+                }) { Text("Выбрать время") }
+            }
+            Button(onClick = {
+                store.updateTaskMeta(taskId, title, description, tags, deadlineIso)
+                onSaveMeta()
+            }) {
+                Text("Сохранить")
+            }
+        } else {
+            Text(text = "Название: ${task.title}")
+            Text(text = "Описание: ${task.description.ifBlank { "—" }}")
+            Text(text = "Теги: ${task.tags.joinToString(", ").ifBlank { "—" }}")
+            Text(text = "Дедлайн: ${deadlineText.ifBlank { "—" }}")
         }
-        Divider()
+        HorizontalDivider()
         Text(text = "Статистика", style = MaterialTheme.typography.titleMedium)
         Text(text = "Сессии: $sessionCount")
         Text(text = "Время фокуса: ${formatDuration(totalSeconds)}")
-        Divider()
-        Text(text = "Помодоро", style = MaterialTheme.typography.titleMedium)
-        val phaseLabel = if (timerSnapshot?.phase == TimerPhase.BREAK) "Перерыв" else "Работа"
-        val remaining = timerSnapshot?.remainingSeconds ?: (task.pomodoro.workMinutes * 60)
-        Text(text = phaseLabel)
-        Text(text = formatClock(remaining), style = MaterialTheme.typography.displaySmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = { store.startTimer(taskId) }) { Text("Старт") }
-            Button(onClick = { store.pauseTimer() }) { Text("Пауза") }
-            Button(onClick = { store.finishSession() }) { Text("Закончить сессию") }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = { onDone(true) }) { Text("Готово") }
-            Button(onClick = onDelete) { Text("Удалить") }
+        if (isActive) {
+            HorizontalDivider()
+            Text(text = "Помодоро", style = MaterialTheme.typography.titleMedium)
+            val phaseLabel = if (timerSnapshot?.phase == TimerPhase.BREAK) "Перерыв" else "Работа"
+            val remaining = timerSnapshot?.remainingSeconds ?: (task.pomodoro.workMinutes * 60)
+            Text(text = phaseLabel)
+            Text(text = formatClock(remaining), style = MaterialTheme.typography.displaySmall)
+            val running = timerSnapshot?.isRunning == true
+            val hasStarted = timerSnapshot != null
+            val startLabel = if (!hasStarted) "Старт" else if (running) "Пауза" else "Продолжить"
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = {
+                    if (running) store.pauseTimer() else store.startTimer(taskId)
+                }) { Text(startLabel) }
+                Button(onClick = {
+                    store.finishSession()
+                    onBack()
+                }) { Text("Закончить сессию") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = {
+                    onDone(true)
+                    onBack()
+                }) { Text("Готово") }
+                Button(onClick = onDelete) { Text("Удалить") }
+            }
         }
     }
 }
@@ -467,8 +588,36 @@ private fun formatDuration(totalSeconds: Int): String {
     return if (hours > 0) "${hours}ч ${minutes}м" else "${minutes}м"
 }
 
-private fun epochToIso(epochMillis: Long): String {
-    if (epochMillis <= 0) return ""
-    val instant = Instant.fromEpochMilliseconds(epochMillis)
-    return instant.toLocalDateTime(TimeZone.currentSystemDefault()).toString()
+@RequiresApi(Build.VERSION_CODES.O)
+private fun formatDeadlineDisplay(date: LocalDate?, time: LocalTime?): String {
+    if (date == null || time == null) return ""
+    val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+    return LocalDateTime.of(date, time).format(formatter)
+}
+
+@RequiresApi(Build.VERSION_CODES.O)
+private fun formatDeadlineIso(date: LocalDate?, time: LocalTime?): String? {
+    if (date == null || time == null) return null
+    val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm")
+    return LocalDateTime.of(date, time).format(formatter)
+}
+
+@RequiresApi(Build.VERSION_CODES.O)
+private fun millisToLocalDate(epochMillis: Long): LocalDate {
+    val instant = java.time.Instant.ofEpochMilli(epochMillis)
+    return instant.atZone(ZoneId.systemDefault()).toLocalDate()
+}
+
+@RequiresApi(Build.VERSION_CODES.O)
+private fun millisToLocalTime(epochMillis: Long): LocalTime {
+    val instant = java.time.Instant.ofEpochMilli(epochMillis)
+    return instant.atZone(ZoneId.systemDefault()).toLocalTime().withSecond(0).withNano(0)
+}
+
+@RequiresApi(Build.VERSION_CODES.O)
+private fun normalizeTime(date: LocalDate?, time: LocalTime?): LocalTime? {
+    if (date == null || time == null) return time
+    val nowDate = LocalDate.now()
+    val nowTime = LocalTime.now().withSecond(0).withNano(0)
+    return if (date == nowDate && time.isBefore(nowTime)) nowTime else time
 }
